@@ -1,15 +1,18 @@
-use futures::{Async, Poll, Stream, task};
+use futures::{
+  Poll, Stream,
+  task::{Context, Waker},
+};
 use lapin_async::consumer::ConsumerSubscriber;
 use log::trace;
 use parking_lot::Mutex;
 
 use std::{
   collections::VecDeque,
+  pin::Pin,
   sync::Arc,
 };
 
 use crate::{
-  error::Error,
   message::Delivery,
   types::ShortString,
 };
@@ -25,7 +28,7 @@ impl ConsumerSubscriber for ConsumerSub {
     let mut inner = self.inner.lock();
     inner.deliveries.push_back(delivery);
     if let Some(task) = inner.task.as_ref() {
-      task.notify();
+      task.wake_by_ref();
     }
   }
   fn drop_prefetched_messages(&self) {
@@ -53,7 +56,7 @@ pub struct Consumer {
 #[derive(Debug)]
 struct ConsumerInner {
   deliveries: VecDeque<Delivery>,
-  task:       Option<task::Task>,
+  task:       Option<Waker>,
   canceled:   bool,
 }
 
@@ -88,24 +91,23 @@ impl Consumer {
 
 impl Stream for Consumer {
   type Item = Delivery;
-  type Error = Error;
 
-  fn poll(&mut self) -> Poll<Option<Delivery>, Error> {
+  fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
     trace!("consumer poll; consumer_tag={:?} polling transport", self.consumer_tag);
     let mut inner = self.inner.lock();
     trace!("consumer poll; consumer_tag={:?} acquired inner lock", self.consumer_tag);
     if inner.task.is_none() {
-      inner.task = Some(task::current());
+      inner.task = Some(cx.waker().clone());
     }
     if let Some(delivery) = inner.deliveries.pop_front() {
       trace!("delivery; consumer_tag={:?} delivery_tag={:?}", self.consumer_tag, delivery.delivery_tag);
-      Ok(Async::Ready(Some(delivery)))
+      Poll::Ready(Some(delivery))
     } else if inner.canceled {
       trace!("consumer canceled; consumer_tag={:?}", self.consumer_tag);
-      Ok(Async::Ready(None))
+      Poll::Ready(None)
     } else {
       trace!("delivery; consumer_tag={:?} status=NotReady", self.consumer_tag);
-      Ok(Async::NotReady)
+      Poll::Pending
     }
   }
 }

@@ -1,4 +1,7 @@
-use futures::{Future, Poll};
+use futures::{
+  TryFuture, Poll,
+  task::Context,
+};
 use lapin_async::{
   Connect as LapinAsyncConnect,
   confirmation::Confirmation,
@@ -14,6 +17,8 @@ use crate::{
 };
 
 pub use lapin_async::connection_properties::{ConnectionSASLMechanism, ConnectionProperties};
+
+use std::pin::Pin;
 
 /// Connect to a server and create channels
 #[derive(Clone)]
@@ -33,19 +38,19 @@ impl Client {
   }
 
   /// Return a future that resolves to a `Channel` once the method succeeds
-  pub fn create_channel(&self) -> impl Future<Item = Channel, Error = Error> + Send + 'static {
+  pub fn create_channel(&self) -> impl TryFuture<Ok = Channel, Error = Error> + Send + 'static {
     Channel::create(self.conn.clone())
   }
 }
 
 pub struct ClientFuture(ConfirmationFuture<Connection>);
 
-impl Future for ClientFuture {
-  type Item = Client;
+impl TryFuture for ClientFuture {
+  type Ok = Client;
   type Error = Error;
 
-  fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-    Ok(self.0.poll()?.map(|conn| Client { conn }))
+  fn try_poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<Self::Ok, Self::Error>> {
+    Pin::new(&mut self.get_mut().0).try_poll(cx).map_ok(|conn| Client { conn })
   }
 }
 

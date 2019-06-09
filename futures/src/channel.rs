@@ -1,7 +1,7 @@
 pub use lapin_async::channel::BasicProperties;
 pub use lapin_async::channel::options::*;
 
-use futures::{Future, future};
+use futures::{Future, TryFuture, TryFutureExt, future};
 use lapin_async;
 use lapin_async::channel::Channel as InnerChannel;
 use lapin_async::connection::Connection;
@@ -23,10 +23,10 @@ pub struct Channel {
 
 impl Channel {
   /// create a channel
-  pub fn create(conn: Connection) -> impl Future<Item = Self, Error = Error> {
-    future::result(conn.create_channel().map(|inner| Channel { inner, conn })).and_then(|channel| {
+  pub fn create(conn: Connection) -> impl TryFuture<Ok = Self, Error = Error> {
+    future::ready(conn.create_channel().map(|inner| Channel { inner, conn })).and_then(|channel| {
       let confirmation: ConfirmationFuture<()> = channel.inner.channel_open().into();
-      confirmation.map(|_| channel)
+      confirmation.map_ok(|_| channel)
     })
   }
 
@@ -119,11 +119,11 @@ impl Channel {
   ///
   /// `Consumer` implements `futures::Stream`, so it can be used with any of
   /// the usual combinators
-  pub fn basic_consume(&self, queue: &Queue, consumer_tag: &str, options: BasicConsumeOptions, arguments: FieldTable) -> impl Future<Item = Consumer, Error = Error> {
+  pub fn basic_consume(&self, queue: &Queue, consumer_tag: &str, options: BasicConsumeOptions, arguments: FieldTable) -> impl TryFuture<Ok = Consumer, Error = Error> {
     let mut consumer = Consumer::new(self.id(), queue.name.clone(), consumer_tag.into());
     let subscriber = consumer.subscriber();
     let confirmation: ConfirmationFuture<ShortString> = self.inner.basic_consume(queue.name.as_str(), consumer_tag, options, arguments, Box::new(subscriber)).into();
-    confirmation.map(|consumer_tag| {
+    confirmation.map_ok(|consumer_tag| {
       trace!("basic_consume received response, returning consumer");
       consumer.update_consumer_tag(consumer_tag);
       consumer
@@ -214,8 +214,8 @@ impl Channel {
     self.inner.tx_rollback().into()
   }
 
-  pub fn wait_for_confirms(&self) -> impl Future<Item = Vec<BasicReturnMessage>, Error = Error> {
+  pub fn wait_for_confirms(&self) -> impl Future<Output = Vec<BasicReturnMessage>> {
     // TODO: make async
-    future::ok(self.inner.wait_for_confirms())
+    future::ready(self.inner.wait_for_confirms())
   }
 }

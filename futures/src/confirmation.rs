@@ -1,4 +1,7 @@
-use futures::{Async, Future, Poll, task};
+use futures::{
+  TryFuture, Poll,
+  task::{Context, Waker},
+};
 use lapin_async::{
   confirmation::Confirmation,
   wait::NotifyReady,
@@ -6,32 +9,35 @@ use lapin_async::{
 
 use crate::error::Error;
 
+use std::pin::Pin;
+
 pub struct ConfirmationFuture<T> {
-  inner:     Result<Confirmation<T>, Option<Error>>,
-  subsribed: bool,
+  inner:      Result<Confirmation<T>, Option<Error>>,
+  subscribed: bool,
 }
 
-struct Watcher(task::Task);
+struct Watcher(Waker);
 
 impl NotifyReady for Watcher {
   fn notify(&self) {
-    self.0.notify();
+    self.0.wake_by_ref();
   }
 }
 
-impl<T> Future for ConfirmationFuture<T> {
-  type Item = T;
+impl<T: Unpin> TryFuture for ConfirmationFuture<T> {
+  type Ok = T;
   type Error = Error;
 
-  fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-    match &mut self.inner {
-      Err(err)         => Err(err.take().expect("ConfirmationFuture polled twice but we were in an error state")),
+  fn try_poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<Self::Ok, Self::Error>> {
+    let fut = self.get_mut();
+    match &mut fut.inner {
+      Err(err)         => Poll::Ready(Err(err.take().expect("ConfirmationFuture polled twice but we were in an error state"))),
       Ok(confirmation) => {
-        if !self.subsribed {
-          confirmation.subscribe(Box::new(Watcher(task::current())));
-          self.subsribed = true;
+        if !fut.subscribed {
+          confirmation.subscribe(Box::new(Watcher(cx.waker().clone())));
+          fut.subscribed = true;
         }
-        Ok(confirmation.try_wait().map(Async::Ready).unwrap_or(Async::NotReady))
+        confirmation.try_wait().map(Ok).map(Poll::Ready).unwrap_or(Poll::Pending)
       },
     }
   }
@@ -39,6 +45,6 @@ impl<T> Future for ConfirmationFuture<T> {
 
 impl<T> From<Confirmation<T>> for ConfirmationFuture<T> {
   fn from(confirmation: Confirmation<T>) -> Self {
-    Self { inner: confirmation.into_result().map_err(Some), subsribed: false }
+    Self { inner: confirmation.into_result().map_err(Some), subscribed: false }
   }
 }
